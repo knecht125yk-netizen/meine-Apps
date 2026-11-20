@@ -23,7 +23,8 @@ def fmt(wert: float, stellen: int = 4) -> str:
         mant, exp = f"{wert:.{stellen - 1}e}".split("e")
         return f"{mant.replace('.', ',')}·10^{int(exp)}"
     if a >= 1000:
-        s = f"{wert:,.1f}" if a < 1e5 else f"{wert:,.0f}"
+        ganz = abs(wert - round(wert)) < 1e-9
+        s = f"{wert:,.0f}" if (ganz or a >= 1e5) else f"{wert:,.1f}"
         return s.replace(",", "X").replace(".", ",").replace("X", ".")
     # signifikante Stellen
     s = f"{wert:.{stellen}g}"
