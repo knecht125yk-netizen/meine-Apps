@@ -30,7 +30,10 @@ jobs:
 
   deploy:
     # Veröffentlichen nur vom Standard-Branch (bzw. manuell gestartet)
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch'
+    # Nur von main (oder manuell). Schlägt nicht rot fehl, solange Pages im Repo nicht aktiviert ist
+    # (bei privaten Repos nur mit bezahltem GitHub-Plan möglich).
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
     needs: test
     runs-on: ubuntu-latest
     environment:
@@ -39,8 +42,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: trainings-app
