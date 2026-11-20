@@ -1,0 +1,66 @@
+name: Windows-Apps bauen
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore: ["trainings-app/**", "**.md"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Maschinenbau-Rechner
+            dir: maschinenbau-rechner
+            args: --collect-data docx --collect-data reportlab --hidden-import matplotlib.backends.backend_qtagg
+          - name: Kassenbuch
+            dir: kassenbuch
+            args: --collect-data reportlab --collect-data openpyxl
+          - name: Programmsperre
+            dir: programmsperre
+            args: ""
+          - name: ToDo-Widget
+            dir: todo-widget
+            args: ""
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ${{ matrix.dir }}/requirements.txt
+
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Tests
+        run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: EXE bauen
+        shell: bash
+        run: |
+          ICON=""
+          if [ -f icon.ico ]; then ICON="--icon icon.ico --add-data icon.ico;."; fi
+          pyinstaller --noconfirm --onefile --windowed --name "${{ matrix.name }}" $ICON ${{ matrix.args }} app.py
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.dir }}/dist/*.exe
+            ${{ matrix.dir }}/README.md
+          retention-days: 30
