@@ -1291,10 +1291,21 @@ class Hauptfenster(QMainWindow):
                 pass
 
 
+def _deutsch(app):
+    """Qt-Standardtexte (OK, Abbrechen, Speichern …) auf Deutsch."""
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    t = QTranslator(app)
+    if t.load(QLocale(QLocale.German, QLocale.Germany), "qtbase", "_",
+              QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
+        app.installTranslator(t)
+        app._uebersetzer = t
+
+
 def main():
     QLocale.setDefault(QLocale(QLocale.German, QLocale.Germany))
     app = QApplication(sys.argv)
     app.setApplicationName("Kassenbuch")
+    _deutsch(app)
     app.setOrganizationName("MeineApps")
     app.setStyle("Fusion")
     app.setStyleSheet(STIL)
