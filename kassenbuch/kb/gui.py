@@ -8,7 +8,7 @@ import shutil
 import sys
 from typing import List, Optional
 
-from PySide6.QtCore import QDate, QLocale, QStandardPaths, Qt, QUrl
+from PySide6.QtCore import QDate, QLocale, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox,
                                QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
+from . import erechnung, excel_liste
 from .ausgabe import MONATE, beleg_pdf, kassenbuch_csv, kassenbuch_excel, kassenbuch_pdf
 from .daten import (ANGEBOT_STATUS, Beleg, Datenbank, Position, RECHNUNG_STATUS, datum_de, euro, heute,
                     parse_euro)
@@ -106,7 +107,8 @@ class GeldEdit(QLineEdit):
 class KundenDialog(QDialog):
     FELDER = [("name", "Name / Firma *"), ("zusatz", "Ansprechpartner / Zusatz"), ("strasse", "Straße, Nr."),
               ("plz", "PLZ"), ("ort", "Ort"), ("email", "E-Mail"), ("telefon", "Telefon"),
-              ("nummer", "Kundennummer (leer = automatisch)")]
+              ("nummer", "Kundennummer (leer = automatisch)"),
+              ("leitweg_id", "Leitweg-ID (nur bei Behörden)")]
 
     def __init__(self, db: Datenbank, kid: Optional[int] = None, parent=None):
         super().__init__(parent)
@@ -440,7 +442,8 @@ class BelegSeite(QWidget):
         self.knoepfe = {}
         aktionen = [("Bearbeiten", self.bearbeiten), ("PDF", self.pdf), ("Duplizieren", self.duplizieren)]
         if rechnung:
-            aktionen += [("Als bezahlt markieren", self.bezahlt), ("Stornieren", self.stornieren)]
+            aktionen += [("E-Rechnung …", self.e_rechnung), ("Als bezahlt markieren", self.bezahlt),
+                         ("Stornieren", self.stornieren)]
         else:
             aktionen += [("→ In Rechnung umwandeln", self.umwandeln), ("Status …", self.status),
                          ("Löschen", self.loeschen)]
@@ -555,6 +558,63 @@ class BelegSeite(QWidget):
             return fehler(self, "Die Datei ist gesperrt – ist sie noch in einem PDF-Programm geöffnet?")
         self.h.db.einstellungen_speichern({"pdf_ordner": os.path.dirname(pfad)})
         datei_oeffnen(pfad)
+
+    def e_rechnung(self):
+        bid = self._id()
+        if bid is None:
+            return
+        b = self.db.beleg(bid)
+        d = QDialog(self)
+        d.setWindowTitle(f"E-Rechnung {b.nummer}")
+        lay = QVBoxLayout(d)
+        info = QLabel("<b>Welches Format?</b><br><br>"
+                      "<b>ZUGFeRD-PDF</b> – sieht aus wie deine normale Rechnung, enthält aber zusätzlich die "
+                      "maschinenlesbaren Daten. Ideal für Firmenkunden per E-Mail.<br><br>"
+                      "<b>XRechnung (XML)</b> – reine Datendatei, vor allem für Behörden/öffentliche Auftraggeber "
+                      "(dort meist mit Leitweg-ID des Kunden).<br><br>"
+                      "<span style='color:#666'>Hinweis: Als Kleinunternehmer (§ 19 UStG) bist du von der Pflicht, "
+                      "E-Rechnungen auszustellen, ausgenommen – du kannst sie aber freiwillig senden, "
+                      "z. B. wenn ein Kunde danach fragt.</span>")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        bb = QDialogButtonBox()
+        b_z = bb.addButton("ZUGFeRD-PDF", QDialogButtonBox.AcceptRole)
+        b_x = bb.addButton("XRechnung (XML)", QDialogButtonBox.AcceptRole)
+        bb.addButton("Abbrechen", QDialogButtonBox.RejectRole)
+        wahl = {}
+        b_z.clicked.connect(lambda: (wahl.setdefault("f", "zugferd"), d.accept()))
+        b_x.clicked.connect(lambda: (wahl.setdefault("f", "xrechnung"), d.accept()))
+        bb.rejected.connect(d.reject)
+        lay.addWidget(bb)
+        d.resize(520, 0)
+        if not d.exec() or "f" not in wahl:
+            return
+        xr = wahl["f"] == "xrechnung"
+        fehlt = erechnung.pflichtangaben_pruefen(self.db, b, xrechnung=xr)
+        if fehlt:
+            return fehler(self, "Für die E-Rechnung fehlen noch Angaben:\n\n• " + "\n• ".join(fehlt))
+        kunde = (b.anschrift.splitlines() or ["Kunde"])[0]
+        sicher = "".join(ch for ch in kunde if ch.isalnum() or ch in " -_").strip().replace(" ", "_")[:40]
+        endung, filt = (("xml", "XRechnung (*.xml)") if xr else ("pdf", "ZUGFeRD-PDF (*.pdf)"))
+        vorschlag = os.path.join(self.h.pdf_ordner(), f"{b.nummer}_{sicher}{'_XRechnung' if xr else '_ZUGFeRD'}.{endung}")
+        pfad, _ = QFileDialog.getSaveFileName(self, "E-Rechnung speichern", vorschlag, filt)
+        if not pfad:
+            return
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            (erechnung.xrechnung_speichern if xr else erechnung.zugferd_pdf)(self.db, b, pfad)
+        except PermissionError:
+            return fehler(self, "Die Datei ist gesperrt – ist sie noch geöffnet?")
+        except Exception as ex:
+            return fehler(self, f"E-Rechnung konnte nicht erstellt werden:\n{ex}")
+        finally:
+            QApplication.restoreOverrideCursor()
+        if xr:
+            QMessageBox.information(self, "XRechnung erstellt", f"Gespeichert:\n{pfad}\n\nDie XML-Datei kannst du "
+                                    "per E-Mail senden oder im Portal des Auftraggebers hochladen.")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(pfad)))
+        else:
+            datei_oeffnen(pfad)
 
     def duplizieren(self):
         bid = self._id()
@@ -704,6 +764,78 @@ class BuchungDialog(QDialog):
         self.accept()
 
 
+class EingangsDialog(QDialog):
+    """Zeigt eine empfangene E-Rechnung lesbar an und bucht sie auf Wunsch als Ausgabe."""
+
+    def __init__(self, db: Datenbank, r, pfad: str, daten: bytes, parent=None):
+        super().__init__(parent)
+        self.db, self.r, self.pfad, self.daten = db, r, pfad, daten
+        self.setWindowTitle(f"E-Rechnung {r.nummer} von {r.verkaeufer}")
+        self.resize(760, 600)
+        lay = QVBoxLayout(self)
+        kopf = QLabel(
+            f"<h2 style='margin:0'>{r.verkaeufer}</h2><span style='color:#666'>{r.verkaeufer_adresse}</span><br><br>"
+            f"<b>Rechnung:</b> {r.nummer} &nbsp; <b>Datum:</b> {datum_de(r.datum)} &nbsp; "
+            f"<b>Fällig:</b> {datum_de(r.faellig) or '–'}<br><b>An:</b> {r.kaeufer} &nbsp; <b>Format:</b> {r.format}"
+            + (f"<br><b>IBAN:</b> {r.iban}" if r.iban else ""))
+        kopf.setTextFormat(Qt.RichText)
+        kopf.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(kopf)
+        t = tabelle(["Bezeichnung", "Menge", "Einheit", "Einzelpreis", "Summe"], 0)
+        for p in r.positionen:
+            z = t.rowCount()
+            t.insertRow(z)
+            for c, v in enumerate([p["bezeichnung"], p["menge"].replace(".", ","), erechnung.einheit_text(p["einheit"]),
+                                   euro(parse_euro(p["preis"])) if p["preis"] else "",
+                                   euro(parse_euro(p["summe"])) if p["summe"] else ""]):
+                t.setItem(z, c, item(v, c >= 1 and c != 2))
+        lay.addWidget(t, 1)
+        summen = QLabel(f"Netto: {euro(r.netto_cent)} · USt: {euro(r.steuer_cent)} · "
+                        f"<b style='font-size:16px'>Zu zahlen: {euro(r.zahlbetrag_cent)}</b>")
+        summen.setAlignment(Qt.AlignRight)
+        lay.addWidget(summen)
+        hinweis = QLabel("Als Kleinunternehmer kannst du keine Vorsteuer abziehen – gebucht wird der Bruttobetrag. "
+                         "Die Originaldatei wird beim Buchen im Datenordner unter „Eingangsrechnungen“ archiviert.")
+        hinweis.setWordWrap(True)
+        hinweis.setStyleSheet("color:#666;")
+        lay.addWidget(hinweis)
+        zeile = QHBoxLayout()
+        self.kat = QComboBox()
+        self.kat.setEditable(True)
+        self.kat.addItems(db.kategorien("A"))
+        self.kat.setCurrentText("Material" if "Material" in db.kategorien("A") else self.kat.itemText(0))
+        self.datum = datum_edit(r.datum or heute())
+        zeile.addWidget(QLabel("Kategorie:"))
+        zeile.addWidget(self.kat, 1)
+        zeile.addWidget(QLabel("Buchungsdatum (Zahlung):"))
+        zeile.addWidget(self.datum)
+        lay.addLayout(zeile)
+        bb = QDialogButtonBox()
+        b_buchen = bb.addButton("Als Ausgabe ins Kassenbuch buchen", QDialogButtonBox.AcceptRole)
+        bb.addButton("Schließen", QDialogButtonBox.RejectRole)
+        b_buchen.clicked.connect(self.buchen)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        if r.zahlbetrag_cent <= 0:
+            b_buchen.setEnabled(False)
+
+    def buchen(self):
+        r = self.r
+        try:
+            ordner = os.path.join(os.path.dirname(self.db.pfad) if self.db.pfad != ":memory:" else
+                                  os.path.expanduser("~"), "Eingangsrechnungen")
+            os.makedirs(ordner, exist_ok=True)
+            name = "".join(ch for ch in f"{r.datum}_{r.verkaeufer}_{r.nummer}" if ch.isalnum() or ch in "-_.")[:90]
+            ziel = os.path.join(ordner, name + os.path.splitext(self.pfad)[1].lower())
+            with open(ziel, "wb") as f:
+                f.write(self.daten)
+            self.db.buchen(iso(self.datum.date()), "A", r.zahlbetrag_cent, self.kat.currentText().strip(),
+                           f"{r.verkaeufer}"[:120], r.nummer)
+        except Exception as ex:
+            return fehler(self, ex)
+        self.accept()
+
+
 class KassenSeite(QWidget):
     def __init__(self, haupt: "Hauptfenster"):
         super().__init__()
@@ -715,7 +847,8 @@ class KassenSeite(QWidget):
             b.setObjectName(name)
             b.clicked.connect(lambda _=False, a=art: self.neu(a))
             leiste.addWidget(b)
-        for text, fn in (("Bearbeiten", self.bearbeiten), ("Löschen", self.loeschen)):
+        for text, fn in (("Bearbeiten", self.bearbeiten), ("Löschen", self.loeschen),
+                         ("📥 E-Rechnung empfangen …", self.e_rechnung_empfangen)):
             b = QPushButton(text)
             b.clicked.connect(fn)
             leiste.addWidget(b)
@@ -820,6 +953,21 @@ class KassenSeite(QWidget):
 
     def neu(self, art):
         if BuchungDialog(self.db, None, art, self).exec():
+            self.h.alles_neu()
+
+    def e_rechnung_empfangen(self):
+        pfad, _ = QFileDialog.getOpenFileName(self, "Empfangene E-Rechnung öffnen", self.h.pdf_ordner(),
+                                              "E-Rechnung (*.xml *.pdf)")
+        if not pfad:
+            return
+        try:
+            with open(pfad, "rb") as f:
+                daten = f.read()
+            r = erechnung.eingang_lesen(daten)
+        except Exception as ex:
+            return fehler(self, ex)
+        d = EingangsDialog(self.db, r, pfad, daten, self)
+        if d.exec():
             self.h.alles_neu()
 
     def bearbeiten(self, *_):
@@ -1101,6 +1249,32 @@ class EinstellungenSeite(QScrollArea):
             self.texte[k] = t
         lay.addWidget(g4)
 
+        g5 = QGroupBox("Excel-Liste (wird automatisch aktuell gehalten)")
+        f5 = QVBoxLayout(g5)
+        self.excel_an = QCheckBox("Nach jeder Änderung automatisch die Excel-Datei aktualisieren")
+        self.excel_pfad = QLabel()
+        self.excel_pfad.setStyleSheet("color:#555;")
+        self.excel_pfad.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        zeile = QHBoxLayout()
+        for text, fn in (("Speicherort …", self.excel_ort), ("Jetzt aktualisieren", lambda: self.h.excel_schreiben(True)),
+                         ("Excel öffnen", self.excel_oeffnen)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            zeile.addWidget(b)
+        zeile.addStretch()
+        erkl = QLabel("Blätter: Übersicht (Monatssummen mit Formeln, Jahr wählbar), Kategorien, Kassenbuch, "
+                      "Rechnungen, Angebote, Kunden, Artikel. Tipp: Speicherort in OneDrive wählen, dann ist die "
+                      "Liste auch auf dem Handy aktuell. Änderungen bitte in der App machen – die Excel-Datei wird "
+                      "überschrieben.")
+        erkl.setWordWrap(True)
+        erkl.setStyleSheet("color:#666;")
+        f5.addWidget(self.excel_an)
+        f5.addWidget(self.excel_pfad)
+        f5.addLayout(zeile)
+        f5.addWidget(erkl)
+        self.excel_an.toggled.connect(self._excel_an)
+        lay.addWidget(g5)
+
         unten = QHBoxLayout()
         b_sp = QPushButton("Einstellungen speichern")
         b_sp.setObjectName("primaer")
@@ -1128,6 +1302,10 @@ class EinstellungenSeite(QScrollArea):
         self.gueltig.setValue(int(e["angebot_gueltig_tage"] or 30))
         self.anfang.setText(euro(int(e["kasse_anfangsbestand_cent"] or 0), False))
         self.auto_kasse.setChecked(e["bezahlt_in_kasse"] == "1")
+        self.excel_an.blockSignals(True)
+        self.excel_an.setChecked(e.get("excel_aktiv", "1") == "1")
+        self.excel_an.blockSignals(False)
+        self.excel_pfad.setText(f"Datei: {self.h.excel_pfad()}")
         for k, t in self.texte.items():
             t.setPlainText(e[k])
         self._logo_zeigen()
@@ -1173,6 +1351,26 @@ class EinstellungenSeite(QScrollArea):
         self.h.statusBar().showMessage("Einstellungen gespeichert.", 4000)
         if not werte["steuernummer"]:
             fehler(self, "Hinweis: Auf Rechnungen ist die Steuernummer (oder USt-IdNr.) Pflicht.")
+
+    def _excel_an(self, an):
+        self.db.einstellungen_speichern({"excel_aktiv": "1" if an else "0"})
+        if an:
+            self.h.excel_schreiben(True)
+
+    def excel_ort(self):
+        pfad, _ = QFileDialog.getSaveFileName(self, "Speicherort der Excel-Liste", self.h.excel_pfad(), "Excel (*.xlsx)")
+        if pfad:
+            if not pfad.lower().endswith(".xlsx"):
+                pfad += ".xlsx"
+            self.db.einstellungen_speichern({"excel_pfad": pfad})
+            self.excel_pfad.setText(f"Datei: {pfad}")
+            self.h.excel_schreiben(True)
+
+    def excel_oeffnen(self):
+        p = self.h.excel_pfad()
+        if not os.path.exists(p):
+            self.h.excel_schreiben(True)
+        datei_oeffnen(p)
 
     def startnummer(self):
         jahr = dt.date.today().year
@@ -1257,6 +1455,43 @@ class Hauptfenster(QMainWindow):
             s.jahre_laden()
         for s in (self.start, self.angebote, self.rechnungen, self.kasse, self.kunden, self.artikel, self.einstellungen):
             s.laden()
+        self.excel_planen()
+
+    # -- Excel-Liste -------------------------------------------------------
+    def excel_pfad(self) -> str:
+        p = self.db.einstellung("excel_pfad")
+        if p:
+            return p
+        docs = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or os.path.expanduser("~")
+        return os.path.join(docs, "Kassenbuch.xlsx")
+
+    def excel_planen(self):
+        if self.db.einstellung("excel_aktiv") == "0" or self.db.pfad == ":memory:":
+            return
+        if not hasattr(self, "_excel_timer"):
+            self._excel_timer = QTimer(self, singleShot=True, interval=1500, timeout=self.excel_schreiben)
+        self._excel_timer.start()
+
+    def excel_schreiben(self, manuell=False):
+        try:
+            excel_liste.schreiben(self.db, self.excel_pfad())
+        except PermissionError:
+            # Datei ist in Excel geöffnet -> später erneut versuchen
+            self.statusBar().showMessage("Excel-Liste ist gerade geöffnet – wird nach dem Schließen automatisch "
+                                         "aktualisiert.")
+            if not hasattr(self, "_excel_retry"):
+                self._excel_retry = QTimer(self, singleShot=True, interval=20000, timeout=self.excel_schreiben)
+            self._excel_retry.start()
+            if manuell:
+                fehler(self, "Die Excel-Datei ist gerade geöffnet. Bitte in Excel schließen – die App aktualisiert "
+                             "sie dann automatisch.")
+            return
+        except Exception as ex:
+            self.statusBar().showMessage(f"Excel-Liste konnte nicht geschrieben werden: {ex}")
+            if manuell:
+                fehler(self, f"Excel-Liste konnte nicht geschrieben werden:\n{ex}")
+            return
+        self.statusBar().showMessage(f"Excel-Liste aktualisiert ({dt.datetime.now():%H:%M:%S}).", 5000)
 
     def pdf_ordner(self) -> str:
         o = self.db.einstellung("pdf_ordner")

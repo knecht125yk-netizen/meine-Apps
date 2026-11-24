@@ -20,7 +20,7 @@ jobs:
             args: --collect-data docx --collect-data reportlab --hidden-import matplotlib.backends.backend_qtagg
           - name: Kassenbuch
             dir: kassenbuch
-            args: --collect-data reportlab --collect-data openpyxl
+            args: --collect-data reportlab --collect-data openpyxl --collect-data facturx
           - name: Programmsperre
             dir: programmsperre
             args: ""
