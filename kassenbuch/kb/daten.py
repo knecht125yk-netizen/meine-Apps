@@ -43,6 +43,8 @@ STANDARD_EINSTELLUNGEN = {
     "kasse_anfangsbestand_cent": "0",
     "kasse_anfangsdatum": "",
     "bezahlt_in_kasse": "1",           # bezahlte Rechnung automatisch als Einnahme buchen
+    "excel_aktiv": "1",                # Excel-Liste automatisch pflegen
+    "excel_pfad": "",                  # leer = Dokumente\Kassenbuch.xlsx
 }
 
 EINNAHME_KATEGORIEN = ["Erlöse", "Sonstige Einnahmen", "Privateinlage"]
@@ -181,10 +183,18 @@ class Datenbank:
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys = ON")
         self.con.executescript(SCHEMA)
+        self._migrieren()
         self._standardwerte()
 
     def schliessen(self):
         self.con.close()
+
+    def _migrieren(self):
+        """Spalten nachrüsten, die in späteren Versionen dazugekommen sind."""
+        spalten = {r[1] for r in self.con.execute("PRAGMA table_info(kunden)")}
+        if "leitweg_id" not in spalten:
+            with self.con:
+                self.con.execute("ALTER TABLE kunden ADD COLUMN leitweg_id TEXT DEFAULT ''")
 
     def _standardwerte(self):
         with self.con:
@@ -239,7 +249,7 @@ class Datenbank:
         return self.con.execute("SELECT * FROM kunden WHERE id=?", (kid,)).fetchone()
 
     def kunde_speichern(self, daten: dict, kid: Optional[int] = None) -> int:
-        felder = ["nummer", "name", "zusatz", "strasse", "plz", "ort", "email", "telefon", "notiz"]
+        felder = ["nummer", "name", "zusatz", "strasse", "plz", "ort", "email", "telefon", "notiz", "leitweg_id"]
         if not daten.get("name", "").strip():
             raise ValueError("Der Kundenname darf nicht leer sein.")
         werte = [daten.get(f, "") or "" for f in felder]
